@@ -3,7 +3,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { User, Sparkles, Volume2, Square } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, detectLanguage } from "@/lib/utils";
 import { useSpeechSynthesis } from "@/lib/speech";
 import { WeatherCard } from "@/components/widgets/WeatherCard";
 import { FlightList } from "@/components/widgets/FlightList";
@@ -14,7 +14,7 @@ export function Message({ msg, autoSpeak }: { msg: ChatMessage; autoSpeak?: bool
   const isUser = msg.role === "user";
   const tts = useSpeechSynthesis();
 
-  const speakThis = () => tts.speak(msg.content);
+  const speakThis = () => tts.speak(msg.content, detectLanguage(msg.content));
   const stopSpeaking = () => tts.stop();
 
   return (

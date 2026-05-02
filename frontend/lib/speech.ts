@@ -54,7 +54,8 @@ export function useSpeechRecognition(opts?: { lang?: string }) {
     const rec = new Ctor();
     rec.continuous = false;
     rec.interimResults = true;
-    rec.lang = opts?.lang ?? "en-US";
+    // Empty string → browser uses its default / auto-detect, supporting any language.
+    rec.lang = opts?.lang ?? "";
 
     rec.onresult = (e) => {
       let text = "";
@@ -119,7 +120,7 @@ export function useSpeechSynthesis() {
     setSupported(typeof window !== "undefined" && "speechSynthesis" in window);
   }, []);
 
-  const speak = useCallback((text: string) => {
+  const speak = useCallback((text: string, lang?: string) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
     const synth = window.speechSynthesis;
     synth.cancel();
@@ -128,13 +129,19 @@ export function useSpeechSynthesis() {
     const u = new SpeechSynthesisUtterance(clean);
     u.rate = 1.0;
     u.pitch = 1.0;
-    u.lang = "en-US";
-    // prefer a non-default English voice if one is available
+    // Use provided language tag, defaulting to en-US.
+    const targetLang = lang || "en-US";
+    u.lang = targetLang;
+    // Pick the best available voice for the target language.
+    // Try exact locale match first, then language-prefix match, then any voice.
     const voices = synth.getVoices();
+    const langPrefix = targetLang.split("-")[0].toLowerCase();
     const preferred =
-      voices.find((v) => /en[-_]US/i.test(v.lang) && /female|samantha|jenny|aria/i.test(v.name)) ||
-      voices.find((v) => /en[-_]US/i.test(v.lang)) ||
-      voices.find((v) => /^en/i.test(v.lang));
+      voices.find((v) => v.lang.toLowerCase() === targetLang.toLowerCase()) ||
+      voices.find((v) => v.lang.toLowerCase().startsWith(langPrefix)) ||
+      (targetLang === "en-US"
+        ? voices.find((v) => /female|samantha|jenny|aria/i.test(v.name))
+        : undefined);
     if (preferred) u.voice = preferred;
     u.onstart = () => setSpeaking(true);
     u.onend = () => setSpeaking(false);

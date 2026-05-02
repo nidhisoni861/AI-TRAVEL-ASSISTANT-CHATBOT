@@ -107,17 +107,19 @@ class LLMService:
         rag_hits = self.rag.query(req.message, k=4)
         rag_block = "\n".join(f"- {h.page_content}" for h in rag_hits) if rag_hits else ""
 
-        # 4. Build prompt
+        # 4. Build structured messages (system + conversation turns)
         history = self.memory.history(req.session_id)
-        prompt = self._build_chat_prompt(
+        user_lang = self._detect_language_name(req.message)
+        messages = self._build_messages(
             history=history,
             preferences=req.preferences.model_dump() if req.preferences else None,
             rag_block=rag_block,
             tool_block="\n".join(tool_router.format_tool_result_for_llm(t) for t in tool_calls),
+            user_lang=user_lang,
         )
 
         # 5. Generate
-        reply = await self._generate(prompt, max_new_tokens=512, temperature=0.7)
+        reply = await self._generate(messages, max_new_tokens=512, temperature=0.7)
 
         # 6. Persist assistant turn
         self.memory.append(req.session_id, "assistant", reply)
@@ -165,27 +167,76 @@ class LLMService:
 
     # ---------- Internals ----------
 
-    def _build_chat_prompt(
+    def _build_messages(
         self,
         history,
         preferences: Optional[dict],
         rag_block: str,
         tool_block: str,
-    ) -> str:
-        parts = [SYSTEM_PROMPT]
+        user_lang: Optional[str] = None,
+    ) -> list[dict]:
+        """Build an OpenAI-compatible messages list with a proper system role."""
+        system_parts = [SYSTEM_PROMPT]
         if preferences:
-            parts.append(f"\n[User preferences]\n{self._format_prefs(preferences)}")
+            system_parts.append(f"\n[User preferences]\n{self._format_prefs(preferences)}")
         if rag_block:
-            parts.append(f"\n[Knowledge base]\n{rag_block}")
+            system_parts.append(f"\n[Knowledge base]\n{rag_block}")
         if tool_block:
-            parts.append(f"\n[Live tool results]\n{tool_block}")
+            system_parts.append(f"\n[Live tool results]\n{tool_block}")
 
-        parts.append("\n[Conversation]")
-        for m in history:
-            tag = "User" if m.role == "user" else "Assistant"
-            parts.append(f"{tag}: {m.content}")
+        messages: list[dict] = [{"role": "system", "content": "\n".join(system_parts)}]
+
+        history_list = list(history)
+        for i, m in enumerate(history_list):
+            role = "user" if m.role == "user" else "assistant"
+            content = m.content
+            # Append a hard language reminder to the last user turn so the
+            # model sees it immediately before generating its response.
+            if role == "user" and i == len(history_list) - 1 and user_lang:
+                content = (
+                    f"{content}\n\n"
+                    f"[IMPORTANT: The user wrote in {user_lang}. "
+                    f"You MUST reply entirely in {user_lang}. "
+                    f"Do NOT use English or any other language.]"
+                )
+            messages.append({"role": role, "content": content})
+
+        return messages
+
+    @staticmethod
+    def _messages_to_raw_prompt(messages: list[dict]) -> str:
+        """Flatten structured messages into a single string for local inference."""
+        parts = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if role == "system":
+                parts.append(content)
+            elif role == "user":
+                parts.append(f"User: {content}")
+            else:
+                parts.append(f"Assistant: {content}")
         parts.append("Assistant:")
         return "\n".join(parts)
+
+    @staticmethod
+    def _detect_language_name(text: str) -> Optional[str]:
+        """Returns the human-readable language name when the script is non-English."""
+        if re.search(r'[઀-૿]', text):
+            return "Gujarati"
+        if re.search(r'[ऀ-ॿ]', text):
+            return "Hindi"
+        if re.search(r'[؀-ۿ]', text):
+            return "Arabic"
+        if re.search(r'[一-鿿]', text):
+            return "Chinese"
+        if re.search(r'[぀-ヿ]', text):
+            return "Japanese"
+        if re.search(r'[가-힯]', text):
+            return "Korean"
+        if re.search(r'[äöüßÄÖÜ]', text):
+            return "German"
+        return None  # English or undetected — no special reminder needed
 
     @staticmethod
     def _format_prefs(prefs: Optional[dict]) -> str:
@@ -230,16 +281,24 @@ class LLMService:
 
     # ---------- Generation backends ----------
 
-    async def _generate(self, prompt: str, max_new_tokens: int, temperature: float) -> str:
+    async def _generate(self, prompt_or_messages, max_new_tokens: int, temperature: float) -> str:
         if self.mode == "hf_api":
-            return await self._generate_hf_api(prompt, max_new_tokens, temperature)
+            if isinstance(prompt_or_messages, list):
+                msgs = prompt_or_messages
+            else:
+                # Raw string prompt (e.g. itinerary): wrap as a user message.
+                msgs = [{"role": "user", "content": prompt_or_messages}]
+            return await self._generate_hf_api(msgs, max_new_tokens, temperature)
         if self.mode in ("local_base", "local_lora"):
-            return self._generate_local(prompt, max_new_tokens, temperature)
+            if isinstance(prompt_or_messages, list):
+                raw = self._messages_to_raw_prompt(prompt_or_messages)
+            else:
+                raw = prompt_or_messages
+            return self._generate_local(raw, max_new_tokens, temperature)
         return "I'm sorry, the LLM is not available right now. Please configure HF_API_TOKEN or run on a machine with GPU."
 
-    async def _generate_hf_api(self, prompt: str, max_new_tokens: int, temperature: float) -> str:
+    async def _generate_hf_api(self, messages: list[dict], max_new_tokens: int, temperature: float) -> str:
         # OpenAI-compatible chat completions via HF Inference Providers router.
-        # The legacy /models/{id} endpoint was deprecated in late 2025.
         url = "https://router.huggingface.co/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.settings.hf_api_token}",
@@ -247,7 +306,7 @@ class LLMService:
         }
         payload = {
             "model": self.settings.base_model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "max_tokens": max_new_tokens,
             "temperature": temperature,
         }

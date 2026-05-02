@@ -6,7 +6,7 @@ import { Message } from "./Message";
 import { ChatInput } from "./ChatInput";
 import { PreferencesPanel } from "./PreferencesPanel";
 import { sendChat, resetSession } from "@/lib/api";
-import { newSessionId, BACKEND } from "@/lib/utils";
+import { newSessionId, BACKEND, detectLanguage } from "@/lib/utils";
 import { useSpeechSynthesis } from "@/lib/speech";
 import type { ChatMessage, UserPreferences } from "@/lib/types";
 
@@ -52,7 +52,7 @@ export function ChatInterface() {
       last.id !== lastSpokenIdRef.current
     ) {
       lastSpokenIdRef.current = last.id;
-      tts.speak(last.content);
+      tts.speak(last.content, detectLanguage(last.content));
     }
   }, [messages, autoSpeak, tts]);
 
