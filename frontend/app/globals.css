@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 250 251 253;
+  --foreground: 17 24 39;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  background: linear-gradient(180deg, #f8fbff 0%, #eff5ff 100%);
+  color: rgb(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+  font-family: var(--font-inter), Inter, system-ui, sans-serif;
+}
+
+/* scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.3); }
+
+/* markdown bubble */
+.prose-chat p { margin: 0.35rem 0; }
+.prose-chat ul { margin: 0.35rem 0 0.35rem 1.1rem; list-style: disc; }
+.prose-chat ol { margin: 0.35rem 0 0.35rem 1.1rem; list-style: decimal; }
+.prose-chat strong { font-weight: 600; }
+.prose-chat code {
+  background: rgba(0,0,0,0.06);
+  padding: 0.05rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+.prose-chat h1, .prose-chat h2, .prose-chat h3 {
+  font-weight: 600;
+  margin: 0.5rem 0 0.25rem;
+}
