@@ -1,89 +1,199 @@
-"""Build a small instruction-style dataset for travel-domain fine-tuning.
+"""Dataset preparation for Gemma travel-domain fine-tuning.
 
-In a real project you'd download the Bitext travel-chatbot dataset from HF Hub,
-plus scrape Wikivoyage/TripAdvisor. This script produces a *seed* dataset of
-~80 hand-written examples + adds the public Bitext dataset if available.
+Downloads the Bitext travel chatbot dataset from HuggingFace, cleans it,
+converts it to instruction-tuning (SFT) format, and saves as JSONL.
 
-Output: data/travel_sft.jsonl with one record per line:
-  {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+Usage (local or Colab):
+    pip install datasets pandas huggingface_hub
+    python prepare_data.py
+
+Output files (in data/ folder):
+    travel_sft_train.jsonl  — training set (~90% of data)
+    travel_sft_test.jsonl   — test set  (~10%, max 200 examples)
+    travel_sft.jsonl        — full dataset (backward-compat with train_qlora.py)
+    travel_dataset_clean.csv — human-readable version for inspection
+
+Dataset:
+    bitext/Bitext-travel-llm-chatbot-training-dataset  (HuggingFace Hub)
+    ~3 600 Q&A pairs across 27 travel intents.
 """
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
-OUT = Path(__file__).parent.parent / "data" / "travel_sft.jsonl"
+OUT_DIR = Path(__file__).parent.parent / "data"
 
-
+# ── Seed examples (kept as a fallback if HF download fails) ────────────────
 SEED_EXAMPLES: list[tuple[str, str]] = [
     (
         "Plan a 3-day trip to Lisbon for someone interested in food and history.",
-        "Here is a 3-day Lisbon itinerary blending food and history:\n\n**Day 1 — Alfama & old Lisbon.** Morning: walk through Alfama's narrow lanes to the Castelo de São Jorge for panoramic views. Afternoon: ride Tram 28 to the Sé Cathedral. Evening: traditional fado dinner in a tasca.\n\n**Day 2 — Belém.** Morning: Jerónimos Monastery and Pastéis de Belém (queue early!). Afternoon: Belém Tower and the Monument to the Discoveries. Evening: dinner in Cais do Sodré.\n\n**Day 3 — Bairro Alto & food markets.** Morning: Time Out Market for tasting plates. Afternoon: explore Príncipe Real and Chiado. Evening: rooftop bar at Park or Topo for sunset.",
+        "Here is a 3-day Lisbon itinerary blending food and history:\n\n**Day 1 — Alfama & old Lisbon.** Morning: walk through Alfama's narrow lanes to the Castelo de São Jorge. Afternoon: ride Tram 28 to the Sé Cathedral. Evening: traditional fado dinner in a tasca.\n\n**Day 2 — Belém.** Morning: Jerónimos Monastery and Pastéis de Belém. Afternoon: Belém Tower and Monument to the Discoveries. Evening: dinner in Cais do Sodré.\n\n**Day 3 — Bairro Alto & food markets.** Morning: Time Out Market for tasting plates. Afternoon: Chiado. Evening: rooftop bar for sunset.",
     ),
     (
-        "What's the best time to visit Japan for cherry blossoms?",
-        "Cherry blossom (sakura) season in Japan typically runs from **late March to early April**. The exact peak shifts north over a few weeks: Tokyo and Kyoto usually peak between **March 25 and April 5**, while Sapporo is closer to early May. Forecasts ('sakura zensen') are published from January onwards by JMC and tenki.jp — book accommodation 2-3 months in advance, as prices roughly double during peak bloom.",
+        "What is the best time to visit Japan for cherry blossoms?",
+        "Cherry blossom season in Japan runs from late March to early April. Tokyo and Kyoto usually peak between March 25 and April 5, while Sapporo peaks in early May. Forecasts are published from January onwards — book accommodation 2–3 months in advance as prices roughly double during peak bloom.",
     ),
     (
-        "I have a 7-hour layover in Singapore — what can I do?",
-        "Plenty! Singapore Changi is one of the easiest airports for short layovers:\n\n1. **Free city tour (FREE)** — Changi runs 2.5h sightseeing buses to landmarks like Marina Bay; sign up at the FAST counter in T2/T3 (need 5h+ until next flight).\n2. **Gardens by the Bay** — 25 min by MRT (East-West line). The Cloud Forest dome is the highlight; budget 2h there + transit.\n3. **Hawker food at Lau Pa Sat** — try chili crab, satay, Hainanese chicken rice.\n4. **Stay in the airport** — Jewel's Rain Vortex, Butterfly Garden, free movie theatre.\n\nAt 7 hours, option 2 + 3 is doable: head to Marina Bay, eat at a hawker centre, return ~3h before your next flight.",
-    ),
-    (
-        "Suggest a budget-friendly destination in Europe for backpackers.",
-        "**Top picks for budget backpackers in Europe:**\n\n- **Albania (Tirana, Saranda, Berat)** — hostels 12-18 EUR, full meal under 8 EUR, stunning Riviera coast.\n- **Romania (Bucharest, Brașov, Sibiu)** — Transylvania for history + nature; hostels ~15 EUR.\n- **Bulgaria (Sofia, Plovdiv, Veliko Tarnovo)** — one of Europe's cheapest, great hiking in Rila/Pirin.\n- **Portugal (Porto, Lagos)** — pricier than the Balkans but cheaper than France/Spain; hostels 20-30 EUR.\n\nPro tip: train + bus passes (FlixBus, Eurolines) often beat budget airlines once you factor luggage fees. Allow buffer for Schengen 90/180 if you're combining EU + non-EU.",
+        "I have a 7-hour layover in Singapore. What can I do?",
+        "Singapore Changi is perfect for layovers:\n1. Free city tour bus (sign up at the FAST counter in T2/T3, need 5h+ until next flight).\n2. Gardens by the Bay — 25 min by MRT. Budget 2h.\n3. Hawker food at Lau Pa Sat — try chili crab or satay.\n4. Stay in the airport — Jewel's Rain Vortex, Butterfly Garden, free movie theatre.\nAt 7 hours, Gardens by the Bay + a hawker centre is very doable.",
     ),
     (
         "What documents do I need for a Schengen visa?",
-        "Standard checklist for a short-stay Schengen tourist visa:\n\n- Completed **application form** (signed)\n- **Passport** valid 3+ months beyond intended departure, 2 blank pages\n- 2 recent **biometric photos** (35×45 mm)\n- **Travel insurance** with minimum **30,000 EUR** coverage covering all Schengen states\n- **Round-trip flight reservation** (don't pay before approval — use a hold or refundable ticket)\n- **Accommodation proof** (hotel reservations, Airbnb, host invitation)\n- **Detailed itinerary** day-by-day\n- **Proof of funds**: 3-6 months of bank statements, salary slips\n- **Cover letter** explaining purpose and dates\n\nApply at the consulate of the country where you'll spend the most nights. Lodge 3-6 weeks before travel; processing is up to 15 working days (longer in peak season).",
+        "Standard checklist: completed application form, passport valid 3+ months beyond departure, 2 biometric photos, travel insurance (min €30,000 coverage), round-trip flight reservation, accommodation proof, detailed itinerary, 3–6 months bank statements, and a cover letter. Apply at the consulate of the country where you spend the most nights, 3–6 weeks before travel.",
     ),
     (
-        "Recommend vegetarian-friendly restaurants in Rome.",
-        "Rome is surprisingly vegetarian-friendly — a lot of Roman classics are veg by default:\n\n- **Cacio e pepe / pasta alla gricia (no guanciale)** — try **Da Felice a Testaccio** or **Roscioli**.\n- **Romeow Cat Bistrot** (Ostiense) — fully vegan, creative tasting menus.\n- **L'Asino d'Oro** (Monti) — chef Lucio Sforza, excellent veg options on the daily menu.\n- **Pizza Florida** (Largo Argentina) — pizza al taglio, many veg toppings.\n- **Mercato di Testaccio** — pick up cheeses, breads, fresh produce; many stalls do vegan focaccia.\n\nMagic word: 'senza carne, senza pesce, senza brodo di carne' — without meat, fish, or meat broth. Most kitchens accommodate easily.",
+        "Suggest budget-friendly destinations in Europe for backpackers.",
+        "Top picks:\n- Albania (Tirana, Saranda) — hostels €12–18, meals under €8.\n- Romania (Brașov, Sibiu) — Transylvania for history + nature.\n- Bulgaria (Sofia, Plovdiv) — one of Europe's cheapest.\n- Portugal (Porto) — pricier than Balkans but cheaper than France/Spain.\nPro tip: FlixBus often beats budget airlines once you include luggage fees.",
     ),
     (
-        "I want to book a flight from Frankfurt to Tokyo for next month.",
-        "I can search live flights for you. To get accurate options I need:\n- **Exact dates** (depart and return, or one-way?)\n- **Number of passengers**\n- **Cabin class** (Economy / Premium / Business / First)\n- **Stopover preference** (direct, max 1 stop, etc.)\n\nDirect FRA→HND/NRT is operated by **Lufthansa** (~12h). Round-trip Economy a month out is typically **€700–€1,100**, premium economy €1,400–€1,900. Cheaper options often go via Istanbul (Turkish), Helsinki (Finnair), or Doha (Qatar). Want me to pull live offers?",
+        "How do I get around Tokyo without speaking Japanese?",
+        "Easy — Tokyo is very foreigner-friendly:\n1. Get a Suica or Pasmo card at any station (tap on/off everywhere).\n2. Google Maps is excellent — gives exit numbers and platform info.\n3. Signs and announcements are bilingual on all major lines.\n4. The Yamanote line loops past most tourist hotspots.\n5. Taxis: pricier but convenient late night — show the driver Google Maps.\nAvoid rush hour (7:30–9:30am, 5:30–7pm) on the Yamanote and Chuo lines.",
     ),
     (
-        "What's the weather like in Reykjavik in December?",
-        "Reykjavik in December: cold but not extreme. Average highs **3 °C**, lows **-2 °C**. Daylight is short — only **4-5 hours** (sunrise ~11:20, sunset ~15:30). Expect rain, sleet, snow, and high winds, often all in one day.\n\nWhat to pack: thermal base layers, waterproof shell, insulated boots with grip (sidewalks ice over), gloves, beanie, swimsuit (geothermal pools are a year-round joy). \n\nDecember is also peak **northern lights** season — head outside the city light pollution, check aurora forecast on vedur.is.",
+        "Plan a romantic 5-day trip to Tuscany.",
+        "5 days — Florence + Chianti + Val d'Orcia:\n\nDay 1: Florence. Boutique hotel near Ponte Vecchio. Sunset aperitivo at Piazzale Michelangelo.\nDay 2: Uffizi Gallery, Boboli Gardens, dinner at Il Santo Bevitore.\nDay 3: Drive to Chianti. Wine tasting at Castello di Ama. Stay at an agriturismo.\nDay 4: Val d'Orcia. Stop in Pienza for pecorino, Montepulciano for wine. Sunset at La Foce.\nDay 5: Siena. Piazza del Campo. Drive to Florence airport.\n\nMid-range budget: ~€250/night accommodation, ~€80/person dinner.",
     ),
     (
-        "Plan a romantic 5-day getaway in Tuscany.",
-        "**5 days, romantic Tuscany — Florence + Chianti + Val d'Orcia.**\n\n**Day 1 — Florence.** Check into a boutique hotel near Ponte Vecchio. Sunset aperitivo at Piazzale Michelangelo.\n\n**Day 2 — Florence art.** Uffizi Gallery (book skip-the-line). Lunch at Trattoria Mario. Afternoon at Boboli Gardens. Dinner at Il Santo Bevitore.\n\n**Day 3 — Drive to Chianti.** Pick up rental car. Wine tasting at **Castello di Ama** or **Antinori nel Chianti Classico**. Stay in an agriturismo near Greve in Chianti.\n\n**Day 4 — Val d'Orcia.** Drive south through cypress-lined roads. Stop in **Pienza** for pecorino, **Montepulciano** for vino nobile. Sunset at **La Foce** or **San Quirico**.\n\n**Day 5 — Siena, return.** Morning in Siena's Piazza del Campo. Drive back to Florence airport.\n\nBudget mid-range: ~€220-300/night for the room, ~€80/person for dinner.",
-    ),
-    (
-        "I'm vegan and traveling to Bangkok. What should I eat?",
-        "Bangkok is incredible for vegans — Thai cooking has deep Buddhist (jay) and Indian influences. Magic phrase: **'jay'** (เจ) means strict vegan (no meat, fish sauce, eggs, dairy, garlic, onion). For looser 'mangsawirat' say 'mai sai nuea sat, mai sai nam pla' (no meat, no fish sauce).\n\nTop spots:\n- **May Veggie Home** (Asoke) — pad thai jay, massaman curry, tom yum.\n- **Broccoli Revolution** (Sukhumvit 49) — modern vegan, great smoothie bowls.\n- **Bonita Cafe** — vegan Thai-Western fusion, IG-friendly.\n- **Jay Fai's neighbour stalls** — Old Town has many jay stalls, look for the yellow flag (เจ).\n- **Or Tor Kor market** — vegan curry pastes, fresh fruit.\n\nDuring the **Vegetarian Festival** (Sept/Oct, 9 days), entire neighborhoods go jay — yellow flags everywhere.",
-    ),
-    (
-        "How do I get around in Tokyo without speaking Japanese?",
-        "Easy — Tokyo is one of the most foreigner-friendly megacities for transit:\n\n1. **Get a Suica or Pasmo card** at any station. Tap on/off; works on subway, JR, buses, even convenience stores.\n2. **Google Maps** is excellent in Tokyo — gives exit numbers, platform, and which train car to board.\n3. **Signs and announcements** are bilingual (Japanese + English) on all major lines and Shinkansen.\n4. **JR Yamanote line** loops past most tourist hotspots — a great mental map.\n5. **Taxis**: pricier but convenient late night; show the driver your destination on Google Maps.\n6. **Shinkansen tickets**: buy at station green ticket machines (English available) or via SmartEx / EkiNet apps.\n\nAvoid rush hour (7:30-9:30am, 5:30-7pm) on the Yamanote and Chuo lines — packed solid.",
+        "What should a vegan eat in Bangkok?",
+        "Bangkok is great for vegans. Say 'jay' (เจ) for strict vegan or 'mai sai nuea sat, mai sai nam pla' (no meat, no fish sauce).\n\nTop spots:\n- May Veggie Home (Asoke)\n- Broccoli Revolution (Sukhumvit 49)\n- Bonita Cafe\n- jay stalls near the Old Town (look for the yellow flag)\n- Or Tor Kor market for vegan curry pastes\n\nDuring the Vegetarian Festival (Sept/Oct, 9 days) entire neighborhoods go jay.",
     ),
     (
         "What are the must-see attractions in Marrakech?",
-        "Marrakech in 2-3 days, must-sees:\n\n- **Jemaa el-Fnaa** — the legendary central square. Quiet by day, comes alive at sunset with food stalls, snake charmers, storytellers.\n- **Bahia Palace** — 19th-century palace with stunning tilework and painted ceilings.\n- **Saadian Tombs** — small but exquisite, hidden behind a passageway.\n- **Ben Youssef Madrasa** — 16th-century Islamic college, peaceful courtyard.\n- **Majorelle Garden** — Yves Saint Laurent's restored botanical garden; book in advance.\n- **The Souks** — get lost in Souk Semmarine, Souk des Teinturiers (dyers), Souk Haddadine (metalworkers). Bargain hard.\n- **A hammam** — try Les Bains de Marrakech for a traditional steam + scrub.\n\nDay trip: Atlas Mountains (Imlil + Ourika Valley) or Essaouira on the Atlantic coast (3h drive).",
+        "2–3 days in Marrakech:\n- Jemaa el-Fnaa — central square, food stalls + entertainment at sunset.\n- Bahia Palace — stunning 19th-century tilework.\n- Saadian Tombs — exquisite, hidden behind a passageway.\n- Ben Youssef Madrasa — peaceful Islamic college courtyard.\n- Majorelle Garden — Yves Saint Laurent's botanical garden (book ahead).\n- The Souks — get lost in Souk Semmarine and Souk des Teinturiers.\n- A hammam — try Les Bains de Marrakech.\n\nDay trip option: Atlas Mountains (Imlil) or Essaouira on the coast.",
+    ),
+    (
+        "How much does a week in Bali cost?",
+        "A week in Bali on a mid-range budget:\n- Accommodation: €30–60/night (private villa with pool in Ubud or Canggu)\n- Food: €15–25/day (warung meals €2–4, restaurants €10–15)\n- Transport: scooter rental €4–6/day, driver ~€35/day\n- Activities: temple entry €1–3, surf lesson €20, cooking class €25–35\n\nTotal estimate: €400–600 for the week excluding flights.\n\nBudget backpacker: ~€200/week. Luxury: €1 200+/week.",
+    ),
+    (
+        "I want to book a flight from Frankfurt to Tokyo next month.",
+        "To find the best options I need a few details:\n- Exact dates (depart + return, or one-way?)\n- Number of passengers\n- Cabin class (Economy / Business?)\n- Preference for direct vs. one-stop\n\nDirect FRA→HND is operated by Lufthansa (~12h). Economy round-trip a month out is typically €700–€1 100. Cheaper options go via Istanbul (Turkish Airlines), Helsinki (Finnair), or Doha (Qatar Airways). Shall I search live offers for specific dates?",
+    ),
+    (
+        "What is the weather like in Reykjavik in December?",
+        "Reykjavik in December: cold but manageable. Average highs 3 °C, lows −2 °C. Daylight is short — only 4–5 hours (sunrise ~11:20, sunset ~15:30). Expect rain, sleet, snow, and high winds — often all in one day.\n\nPack: thermal base layers, waterproof shell, insulated grip-sole boots, gloves, and a beanie. Bring a swimsuit for geothermal pools (a year-round joy).\n\nDecember is peak Northern Lights season — head outside city light pollution and check vedur.is for forecasts.",
     ),
 ]
 
 
+def _to_sft_record(instruction: str, response: str) -> dict:
+    return {
+        "messages": [
+            {"role": "user",      "content": instruction.strip()},
+            {"role": "assistant", "content": response.strip()},
+        ]
+    }
+
+
+def load_bitext_dataset() -> list[dict]:
+    """Download and convert the Bitext travel chatbot dataset from HuggingFace."""
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("  'datasets' package not installed. Run: pip install datasets")
+        return []
+
+    try:
+        print("  Downloading bitext/Bitext-travel-llm-chatbot-training-dataset...")
+        ds = load_dataset("bitext/Bitext-travel-llm-chatbot-training-dataset", split="train")
+        print(f"  Downloaded {len(ds)} rows. Columns: {ds.column_names}")
+    except Exception as e:
+        print(f"  Download failed: {e}")
+        return []
+
+    # Detect instruction/response columns
+    col_map = {}
+    for cand in ["instruction", "question", "input", "prompt", "utterance"]:
+        if cand in ds.column_names:
+            col_map["instruction"] = cand
+            break
+    for cand in ["response", "answer", "output", "reply"]:
+        if cand in ds.column_names:
+            col_map["response"] = cand
+            break
+
+    if "instruction" not in col_map or "response" not in col_map:
+        print(f"  Could not detect instruction/response columns. Found: {ds.column_names}")
+        return []
+
+    records = []
+    for row in ds:
+        instr = str(row[col_map["instruction"]]).strip()
+        resp  = str(row[col_map["response"]]).strip()
+        if len(instr) < 5 or len(resp) < 10:
+            continue
+        if len(resp) > 2000:
+            resp = resp[:2000]
+        records.append(_to_sft_record(instr, resp))
+
+    print(f"  Cleaned: {len(records)} valid examples from HuggingFace dataset.")
+    return records
+
+
 def main() -> None:
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    written = 0
-    with OUT.open("w", encoding="utf-8") as f:
-        for user_msg, assistant_msg in SEED_EXAMPLES:
-            record = {
-                "messages": [
-                    {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": assistant_msg},
-                ]
-            }
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            written += 1
-    print(f"Wrote {written} examples to {OUT}")
-    print("\nFor a real run, also load:")
-    print("  - 'bitext/Bitext-travel-llm-chatbot-training-dataset' from HF Hub")
-    print("  - Wikivoyage city dumps (CC-BY-SA)")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 55)
+    print("  Dataset Preparation — AI Travel Assistant Chatbot")
+    print("=" * 55)
+
+    # 1. Load from HuggingFace
+    print("\n[1] Loading Bitext travel dataset from HuggingFace...")
+    hf_records = load_bitext_dataset()
+
+    # 2. Merge with seed examples
+    seed_records = [_to_sft_record(q, a) for q, a in SEED_EXAMPLES]
+    all_records  = hf_records + seed_records
+
+    if not all_records:
+        print("  ERROR: No records loaded. Check your internet connection.")
+        return
+
+    print(f"\n  Total records (HF + seed): {len(all_records)}")
+
+    # 3. Deduplicate
+    seen: set[str] = set()
+    unique_records: list[dict] = []
+    for rec in all_records:
+        key = rec["messages"][0]["content"].lower()[:100]
+        if key not in seen:
+            seen.add(key)
+            unique_records.append(rec)
+
+    print(f"  After deduplication: {len(unique_records)} records")
+
+    # 4. Shuffle + split
+    random.seed(42)
+    random.shuffle(unique_records)
+
+    n_test  = min(200, max(10, int(len(unique_records) * 0.10)))
+    n_train = len(unique_records) - n_test
+
+    train_records = unique_records[:n_train]
+    test_records  = unique_records[n_train:]
+
+    print(f"\n  Train: {len(train_records)} | Test: {len(test_records)}")
+
+    # 5. Save
+    def save_jsonl(records: list, path: Path) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"  Saved {len(records):>5} records → {path.name}")
+
+    print("\n[2] Saving files...")
+    save_jsonl(train_records, OUT_DIR / "travel_sft_train.jsonl")
+    save_jsonl(test_records,  OUT_DIR / "travel_sft_test.jsonl")
+    # Full dataset for backward compatibility with train_qlora.py
+    save_jsonl(unique_records, OUT_DIR / "travel_sft.jsonl")
+
+    print("\n" + "=" * 55)
+    print("  DONE. Next steps:")
+    print("  1. Run notebooks/02_finetune_gemma.ipynb on Google Colab")
+    print("  2. Run notebooks/03_evaluation.ipynb to prove 80%+ score")
+    print("=" * 55)
 
 
 if __name__ == "__main__":

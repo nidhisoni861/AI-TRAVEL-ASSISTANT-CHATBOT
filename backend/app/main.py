@@ -1,3 +1,5 @@
+import sys
+import pathlib
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,12 +7,24 @@ from loguru import logger
 
 from app.config import get_settings
 from app.routers import chat, flights, weather, places, itinerary, health
+from app.routers import history
 from app.services.llm_service import LLMService
 from app.services.rag_service import RAGService
+
+# Allow importing database.py from backend root
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialise database tables
+    try:
+        from database import init_db
+        init_db()
+        logger.info("SQLite database initialised")
+    except Exception as e:
+        logger.warning(f"Database init failed (non-fatal): {e}")
+
     settings = get_settings()
     logger.info("Starting AI Travel Assistant backend")
     logger.info(f"Base model: {settings.base_model}")
@@ -31,7 +45,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title="AI Travel Assistant Chatbot",
-        description="Fine-tuned LLM + RAG + real-time travel APIs",
+        description="Fine-tuned Gemma 2B (QLoRA) + RAG + real-time travel APIs",
         version="1.0.0",
         lifespan=lifespan,
     )
@@ -53,6 +67,7 @@ def create_app() -> FastAPI:
     app.include_router(weather.router)
     app.include_router(places.router)
     app.include_router(itinerary.router)
+    app.include_router(history.router)
 
     return app
 
