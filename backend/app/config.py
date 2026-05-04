@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     )
 
     # LLM
-    base_model: str = "Qwen/Qwen2.5-7B-Instruct"
+    base_model: str = "google/gemma-2-2b-it"
+    
     lora_adapter_path: str = ""
     hf_api_token: str = ""
     use_hf_inference_api: bool = False

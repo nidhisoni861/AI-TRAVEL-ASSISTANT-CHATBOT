@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"c:\\\\Nidhi\\\\unniversityproject\\\\voice-ai-travel-assistance-app\" -Recurse -Force)",
+      "Bash(Select-Object -ExpandProperty FullName)"
+    ]
+  }
+}
